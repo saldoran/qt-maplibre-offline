@@ -1,0 +1,46 @@
+# ── Build artifacts ──────────────────────────────────────────────────────────
+build/
+build-*/
+*.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+.ninja_*
+*.ninja
+
+# ── maplibre-native-qt (clone or build output — not committed) ───────────────
+maplibre-native-qt/
+maplibre-build/
+maplibre-install/
+
+# ── Offline tiles (can be 10-100 MB — not committed) ────────────────────────
+tiles/*.png
+tiles/**/*.png
+tiles/offline-style.json
+
+# Keep the placeholder
+!tiles/.gitkeep
+
+# ── Qt Creator ───────────────────────────────────────────────────────────────
+*.pro.user
+*.qmlproject.user
+.qtcreator/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
