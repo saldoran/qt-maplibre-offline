@@ -5,7 +5,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ── Qt 6 ────────────────────────────────────────────────────────────────────
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick Location Positioning)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick Location Positioning Network)
+
+# ── zlib (for PMTiles gzip decompression) ───────────────────────────────────
+find_package(ZLIB QUIET)
+if(NOT ZLIB_FOUND)
+    # MinGW bundles zlib in sysroot; create an interface target for -lz
+    add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+    set_target_properties(ZLIB::ZLIB PROPERTIES INTERFACE_LINK_LIBRARIES "z")
+    message(STATUS "System zlib not found via find_package — falling back to -lz")
+endif()
 qt_standard_project_setup(REQUIRES 6.5)
 
 # ── QMapLibre ────────────────────────────────────────────────────────────────
@@ -14,24 +23,41 @@ qt_standard_project_setup(REQUIRES 6.5)
 find_package(QMapLibre QUIET COMPONENTS Core Location)
 
 if(NOT QMapLibre_FOUND)
+    # Options must be set before add_subdirectory / FetchContent_MakeAvailable
+    set(MLN_QT_WITH_WIDGETS        OFF CACHE BOOL "" FORCE)
+    set(MLN_QT_WITH_LOCATION       ON  CACHE BOOL "" FORCE)
+    set(MLN_QT_WITH_QUICK_PLUGIN   ON  CACHE BOOL "" FORCE)
+    set(MLN_WITH_OPENGL            ON  CACHE BOOL "" FORCE)
+
     set(_mln_submod "${CMAKE_CURRENT_SOURCE_DIR}/maplibre-native-qt")
     if(EXISTS "${_mln_submod}/CMakeLists.txt")
+        # Priority 2: local submodule
         message(STATUS "QMapLibre not installed — building from submodule")
-        set(MLN_QT_WITH_WIDGETS OFF CACHE BOOL "" FORCE)
-        set(MLN_QT_WITH_LOCATION ON  CACHE BOOL "" FORCE)
         add_subdirectory("${_mln_submod}" maplibre-native-qt EXCLUDE_FROM_ALL)
     else()
-        message(FATAL_ERROR
-            "\n  QMapLibre not found. Choose one option:\n"
-            "  A) cmake -B build -DQMapLibre_DIR=<install>/lib/cmake/QMapLibre\n"
-            "  B) Run scripts/build_maplibre_qt.sh (or .ps1) first, then re-run cmake\n"
-            "  C) git submodule add https://github.com/maplibre/maplibre-native-qt.git\n"
-            "     git submodule update --init --recursive\n")
+        # Priority 3: auto-download via FetchContent
+        message(STATUS "QMapLibre not installed — downloading via FetchContent (this takes a while the first time)")
+        include(FetchContent)
+        set(FETCHCONTENT_QUIET OFF)
+        FetchContent_Declare(maplibre-native-qt
+            GIT_REPOSITORY https://github.com/maplibre/maplibre-native-qt.git
+            GIT_TAG        main
+            GIT_SHALLOW    ON
+            GIT_SUBMODULES_RECURSE ON
+            GIT_PROGRESS   ON
+        )
+        FetchContent_MakeAvailable(maplibre-native-qt)
     endif()
 endif()
 
 # ── Executable ───────────────────────────────────────────────────────────────
-qt_add_executable(poc_map main.cpp)
+qt_add_executable(poc_map
+    main.cpp
+    src/pmtiles_reader.h
+    src/pmtiles_reader.cpp
+    src/tile_server.h
+    src/tile_server.cpp
+)
 
 qt_add_qml_module(poc_map
     URI PocMap
@@ -47,6 +73,8 @@ set_target_properties(poc_map PROPERTIES
 )
 
 # ── Link ─────────────────────────────────────────────────────────────────────
+target_include_directories(poc_map PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 target_link_libraries(poc_map
     PRIVATE
         Qt6::Core
@@ -54,22 +82,70 @@ target_link_libraries(poc_map
         Qt6::Quick
         Qt6::Location
         Qt6::Positioning
+        Qt6::Network
         QMapLibre::Core
         QMapLibre::Location
+        ZLIB::ZLIB
 )
 
 # Deploy MapLibre geoservices plugin + QML module alongside the binary
-qmaplibre_location_setup_plugins(poc_map)
+# (only available when QMapLibre was found via find_package, not from source)
+if(QMapLibre_FOUND AND COMMAND qmaplibre_location_setup_plugins)
+    qmaplibre_location_setup_plugins(poc_map)
+endif()
 
-# ── Windows: copy QMapLibre DLLs next to the exe ─────────────────────────────
+# ── Windows: deploy DLLs and plugins next to the exe ────────────────────────
 if(WIN32)
-    add_custom_command(TARGET poc_map POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:QMapLibre::Core>
-            $<TARGET_FILE:QMapLibre::Location>
-            $<TARGET_FILE_DIR:poc_map>
-        COMMENT "Copying QMapLibre DLLs"
+    # windeployqt copies all Qt DLLs and runtime dependencies automatically
+    find_program(_windeployqt windeployqt
+        HINTS "${Qt6_DIR}/../../../bin"
     )
+    if(_windeployqt)
+        add_custom_command(TARGET poc_map POST_BUILD
+            COMMAND "${_windeployqt}"
+                --no-translations
+                --no-system-d3d-compiler
+                --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/qml"
+                "$<TARGET_FILE:poc_map>"
+            COMMENT "Running windeployqt"
+        )
+    endif()
+
+    # Copy QMapLibre DLLs from external install (Priority 1 only)
+    set(_mln_install "${CMAKE_CURRENT_SOURCE_DIR}/maplibre-install")
+    if(EXISTS "${_mln_install}/bin")
+        add_custom_command(TARGET poc_map POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_mln_install}/bin/QMapLibre.dll"
+                "${_mln_install}/bin/QMapLibreLocation.dll"
+                "${_mln_install}/bin/QMapLibreQuickPrivate.dll"
+                $<TARGET_FILE_DIR:poc_map>
+            COMMENT "Copying QMapLibre DLLs"
+        )
+        add_custom_command(TARGET poc_map POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:poc_map>/plugins/geoservices"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_mln_install}/plugins/geoservices/qtgeoservices_maplibre.dll"
+                "$<TARGET_FILE_DIR:poc_map>/plugins/geoservices/"
+            COMMENT "Copying MapLibre geoservices plugin"
+        )
+        add_custom_command(TARGET poc_map POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:poc_map>/qml/MapLibre"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_mln_install}/qml/MapLibre/declarative_maplibre.dll"
+                "${_mln_install}/qml/MapLibre/qmldir"
+                "$<TARGET_FILE_DIR:poc_map>/qml/MapLibre/"
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:poc_map>/qml/MapLibre/Location"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_mln_install}/qml/MapLibre/Location/declarative_maplibre_locationplugin.dll"
+                "${_mln_install}/qml/MapLibre/Location/qmldir"
+                "$<TARGET_FILE_DIR:poc_map>/qml/MapLibre/Location/"
+            COMMENT "Copying MapLibre QML plugins"
+        )
+    endif()
 endif()
 
 # ── Install ──────────────────────────────────────────────────────────────────

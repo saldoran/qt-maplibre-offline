@@ -1,263 +1,177 @@
-# MapLibre Native Qt — PoC
+## What this is
 
-Минимальное proof-of-concept приложение: Qt Quick + MapLibre Native for Qt.
-Показывает карту с pan/zoom/rotation/pitch, сценарий online и **offline** (локальные тайлы).
+A minimal Qt Quick + MapLibre Native PoC that renders an interactive 2.5D vector map with pan/zoom/rotation/pitch and dark mode. Fully offline: vector tiles (PMTiles) are served by an embedded C++ HTTP server (QTcpServer), no external processes or internet required at runtime (except for font glyphs in the current PoC).
 
----
+**Stack:** C++17, Qt 6.5+, QML, MapLibre Native for Qt (`maplibre-native-qt` v4), CMake 3.21+, zlib, Python 3.8+ (tile download script only).
 
-## Что умеет PoC
+## Build
 
-| Функция | Статус | Примечание |
-|---------|--------|------------|
-| Отображение карты (QML) | ✅ | `MapView` из Qt Location |
-| Pan / Zoom | ✅ | встроено в `MapView` (gesture) |
-| Rotation (bearing) | ✅ | два пальца / `map.bearing` |
-| Pitch / Tilt | ✅* | `map.tilt` — зависит от поддержки плагина |
-| Offline-режим | ✅ | OSM растровые тайлы + локальный HTTP-сервер |
-| Маркер «текущей позиции» | ✅ | фиктивные координаты, фиксированный оверлей |
+### Prerequisites
 
-> *Pitch работает, если плагин `maplibre` объявляет `TiltFeature`.
->  Если `map.tilt` не реагирует — см. раздел «Известные ограничения».
+- **Qt 6.5+** with modules: Core, Gui, Quick, Location, Positioning, Network
+- **CMake 3.21+**
+- **C++17 compiler** (MinGW, GCC, Clang)
+- **zlib** (bundled with MinGW and most Linux distros)
+- **Windows only:** enable long paths for git (maplibre submodules have deep paths):
+  ```bash
+  git config --global core.longpaths true
+  ```
 
----
+### Build the PoC
 
-## Версии
+The simplest way — CMake auto-downloads `maplibre-native-qt` via FetchContent (first build takes 15-40 min, ~3.5 GB):
 
-| Компонент | Версия |
-|-----------|--------|
-| Qt | **6.5+** (протестировано на 6.6 / 6.7) |
-| maplibre-native-qt | последний `main` (или тег `v3.x`) |
-| CMake | 3.21+ |
-| Python | 3.8+ (только для offline-скриптов) |
-| ОС | Windows 10/11, Linux (Ubuntu 22.04+) |
-
-Точный commit maplibre-native-qt записывается в `maplibre-native-qt/.git/HEAD`
-после выполнения скрипта `scripts/build_maplibre_qt.sh`.
-
----
-
-## Структура репозитория
-
-```
-PoC_Map/
-├── CMakeLists.txt              — CMake проект
-├── main.cpp                    — точка входа (Qt Quick + context props)
-├── qml/
-│   └── main.qml               — карта, toolbar, статус-бар
-├── scripts/
-│   ├── build_maplibre_qt.sh   — сборка maplibre-native-qt (Linux/macOS)
-│   ├── build_maplibre_qt.ps1  — сборка maplibre-native-qt (Windows)
-│   ├── download_tiles.py      — загрузка OSM-тайлов для offline
-│   └── serve_local.py         — локальный HTTP-сервер тайлов
-├── tiles/                     — сюда ложатся {z}/{x}/{y}.png + offline-style.json
-│   └── .gitkeep               — директория в git (сами тайлы — в .gitignore)
-└── README.md
-```
-
----
-
-## Быстрый старт
-
-### 1. Предварительные требования
-
-**Linux / Ubuntu:**
 ```bash
-sudo apt-get install -y \
-    cmake ninja-build git python3 \
-    libgl1-mesa-dev libcurl4-openssl-dev libssl-dev \
-    ccache pkg-config
-# + Qt 6.5+ установить через Qt Installer (онлайн) или пакетный менеджер
+# Windows MinGW:
+cmake -B build -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH="C:\Qt\6.9.2\mingw_64"
+cmake --build build
+
+# Linux/macOS:
+cmake -B build
+cmake --build build
 ```
 
-**Windows:**
-- Visual Studio 2019/2022 (workload «Desktop development with C++»)
-- Qt 6.5+ MSVC build — [qt.io/download](https://www.qt.io/download)
-- CMake 3.21+ (входит в VS или `winget install Kitware.CMake`)
-- Git, Python 3.8+
+QMapLibre is resolved in this order:
+1. **External install** — pass `-DQMapLibre_DIR=<path>/lib/cmake/QMapLibre`
+2. **Git submodule** — if `maplibre-native-qt/` directory exists locally
+3. **FetchContent** (automatic) — downloads and builds from GitHub
 
----
+#### Option: pre-build MapLibre separately (faster re-builds)
 
-### 2. Сборка maplibre-native-qt
+```powershell
+# Windows (PowerShell):
+.\scripts\build_maplibre_qt.ps1 -QtDir "C:\Qt\6.9.2\mingw_64\lib\cmake\Qt6"
 
-> Это **одноразовый шаг**. Занимает 10–40 минут.
-> Результат кешируется в `maplibre-install/`.
-
-**Linux / macOS:**
-```bash
+# Linux/macOS:
 bash scripts/build_maplibre_qt.sh
 ```
 
-**Windows (PowerShell, запускать из Developer PowerShell for VS):**
-```powershell
-# Если Qt не в PATH, задай путь явно:
-.\scripts\build_maplibre_qt.ps1 -QtDir "C:\Qt\6.6.0\msvc2019_64\lib\cmake\Qt6"
-```
-
-После завершения скрипт выведет путь `QMapLibre_DIR`.
-
----
-
-### 3. Сборка PoC
-
+Then pass the install path:
 ```bash
-cmake -B build -DQMapLibre_DIR="<path>/maplibre-install/lib/cmake/QMapLibre"
+cmake -B build -DQMapLibre_DIR="maplibre-install/lib/cmake/QMapLibre"
 cmake --build build
+```
+
+### Run
+
+```bash
+# Run from the project root (so the app finds tiles/ directory):
 # Windows:
-cmake --build build --config Release
-```
-
-> **Проверка:** `cmake -B build && cmake --build build` должны завершиться без ошибок.
-
----
-
-### 4. Запуск — Online-режим
-
-```bash
-# Linux
+.\build\poc_map.exe
+# Linux:
 ./build/poc_map
-
-# Windows
-.\build\Release\poc_map.exe
 ```
 
-Карта загружается с `https://demotiles.maplibre.org/style.json` — публичный демо-стиль MapLibre, **API-ключ не нужен**.
+The app auto-discovers `tiles/*.pmtiles`, starts an embedded HTTP tile server on a random port, and passes the style URL to MapLibre. No external tile server needed.
 
----
+The app searches for the `tiles/` directory in: `./tiles`, `../tiles`, `../../tiles` (relative to CWD).
 
-### 5. Подготовка данных для Offline
+## Offline vector tiles
 
-#### 5a. Скачать OSM-тайлы
+### Download tiles for a country
 
 ```bash
-# По умолчанию: центр Варшавы, радиус 4 км, zoom 5-13
-python3 scripts/download_tiles.py
+# Poland, zoom 0-14 (~700 MB, ~2 min)
+python scripts/download_tiles.py --country poland --max-zoom 14
 
-# Кастомный регион (lat lon radius_km max_zoom):
-python3 scripts/download_tiles.py 50.0647 19.9450 5 13   # Краков
-python3 scripts/download_tiles.py 48.8566 2.3522 3 12    # Париж
+# Poland, zoom 0-16 (~3.7 GB, ~3 min) — current setup
+python scripts/download_tiles.py --country poland --max-zoom 16
+
+# List all available countries with size estimates
+python scripts/download_tiles.py --list-countries
+
+# Custom bounding box
+python scripts/download_tiles.py --bbox "14.07,49.00,24.15,54.84" --max-zoom 14
 ```
 
-Скрипт:
-- Рассчитывает нужные тайлы, показывает количество и примерный размер
-- Запрашивает подтверждение перед загрузкой
-- Скачивает с `tile.openstreetmap.org` с ограничением 1 запрос/с
-- Генерирует `tiles/offline-style.json` (MapLibre стиль с `localhost:8080`)
-- Пропускает уже скачанные тайлы (повторный запуск безопасен)
+The script auto-downloads the `pmtiles` CLI if not found. It extracts the region from the Protomaps weekly planet build via HTTP range requests (no full planet download).
 
-**Примерный размер и время:**
+Output: `tiles/<country>.pmtiles` + `tiles/vector-style.json`.
 
-| Регион | zoom 5-13 | Тайлов | Размер | Время |
-|--------|-----------|--------|--------|-------|
-| 4 km² (центр города) | 5-13 | ~1 400 | ~35 MB | ~25 мин |
-| 10 km² | 5-13 | ~3 000 | ~75 MB | ~55 мин |
+### Adding a new country
 
-#### 5b. Запустить локальный тайл-сервер
+Add an entry to the `COUNTRIES` dict in `download_tiles.py` with `bbox` (min_lon,min_lat,max_lon,max_lat) and `center` [lat,lon]. Bboxes can be found at https://boundingbox.klokantech.com/ (CSV format).
 
-```bash
-# Из папки PoC_Map:
-python3 scripts/serve_local.py
-# Сервер стартует на http://localhost:8080
-```
+### Size reference (measured/estimated)
 
-#### 5c. Запустить PoC в offline-режиме
+| Country     | z14    | z16    | z18     |
+|-------------|--------|--------|---------|
+| Poland      | 0.7 GB | 3.7 GB | ~20 GB  |
+| Germany     | 1.5 GB | ~8 GB  | ~40 GB  |
+| Czechia     | 0.3 GB | 1.5 GB | ~8 GB   |
+| Netherlands | 0.2 GB | 1.2 GB | ~6 GB   |
 
-```bash
-# Отключи интернет (или просто убедись, что сервер запущен)
-./build/poc_map --offline
-```
+### Tile schema
 
-Карта загрузится **без интернета** с локального сервера.
+Tiles use **Protomaps v4 basemap** schema (NOT OpenMapTiles). Key differences:
+- Source layers: `earth`, `water`, `landuse`, `roads`, `boundaries`, `places`, `pois`
+- Roads use `kind`: `highway`, `major_road`, `medium_road`, `minor_road`, `path`
+- Places use `kind`: `city`, `town`, `village`, `suburb`, `hamlet`
+- Boundaries use `kind`: `country`, `region`
+- No `building` layer at low zooms; `landuse` uses `kind` not `class`
 
----
-
-### 6. Кастомный стиль / тайлы (альтернативы)
-
-Можно передать любой URL стиля как аргумент:
-
-```bash
-# Свой стиль (файл или URL)
-./build/poc_map "file:///home/user/my-style.json"
-./build/poc_map "http://localhost:8080/my-custom-style.json"
-```
-
-**Альтернативные источники тайлов (vector tiles):**
-
-| Источник | Формат | Бесплатно |
-|----------|--------|-----------|
-| [openfreemap.org](https://openfreemap.org) | PMTiles / MBTiles (planet) | ✅ |
-| [Geofabrik](https://download.geofabrik.de) + [tilemaker](https://github.com/systemed/tilemaker) | PBF → MBTiles | ✅ |
-| [MapTiler](https://cloud.maptiler.com) | MBTiles (city extracts) | Freemium |
-
-Для **vector tiles** нужен сервер, поддерживающий MBTiles (например [Martin](https://github.com/maplibre/martin) или [TileServer GL](https://github.com/maptiles/tileserver-gl)), и соответствующий `style.json` с OpenMapTiles-совместимыми слоями.
-
----
-
-## Управление в приложении
-
-| Действие | Управление |
-|----------|------------|
-| Pan | Mouse drag / Touch drag |
-| Zoom in / out | Scroll wheel / Pinch / Кнопки `+` / `−` |
-| Rotation | Two-finger rotate / Ctrl+drag (зависит от платформы) |
-| Pitch toggle 0° / 45° | Кнопка **Tilt** в тулбаре |
-| Reset bearing | Кнопка **⊕ N** |
-| Reset view (Варшава) | Кнопка **⌂** |
-
----
-
-## Как это работает (архитектура)
+## Architecture
 
 ```
 main.cpp
-  → устанавливает QSGRendererInterface::OpenGL
-  → читает --offline / style URL из аргументов
-  → передаёт в QML через rootContext()->setContextProperty(...)
+  Forces OpenGL (QSGRendererInterface::OpenGL) on non-Apple
+  Auto-discovers tiles/ directory, starts embedded TileServer
+  Exposes initialStyleUrl (dynamic port) + isOfflineMode to QML
+  Falls back to online demo tiles if no .pmtiles found
+
+src/pmtiles_reader.h/.cpp
+  PMTiles v3 binary format reader:
+    127-byte header parsing (offsets, compression, zoom range)
+    Hilbert curve tile ID: zxyToTileId(z,x,y) via hilbertXy2d()
+    Varint-encoded directory parsing (delta-coded tile IDs, contiguous offsets)
+    Two-level lookup: root directory -> leaf directory -> tile data
+    gzip decompression via zlib inflateInit2(MAX_WBITS + 16)
+
+src/tile_server.h/.cpp
+  QTcpServer-based HTTP server (async, main thread):
+    GET /<archive>/<z>/<x>/<y> -> PMTiles reader -> raw PBF
+    GET /*.json -> style file with localhost:PORT auto-substitution
+    Per-socket buffering for partial HTTP reads
+    CORS headers, keep-alive connections
+    Port 0 = OS auto-assignment
 
 qml/main.qml
-  → Plugin { name: "maplibre"; PluginParameter { name: "maplibre.map.styles" } }
-  → MapView { map.plugin: mapPlugin; map.tilt; map.bearing }
-  → Toolbar с кнопками управления
-  → Status overlay (lat/lon/bearing/tilt в реальном времени)
+  Plugin { name: "maplibre" } with maplibre.map.styles -> vector-style.json
+  MapView with zoom/rotate/tilt controls
+  MapLibre.Location 4.0: Style { LayerParameter { paint: ... } }
+    -> Runtime dark mode via reactive paint property overrides
+    -> No plugin recreation, no OpenGL teardown
+  Screen-space position marker + status overlay
 
-Offline:
-  tiles/{z}/{x}/{y}.png  ←  download_tiles.py (OSM)
-  tiles/offline-style.json  ←  генерируется download_tiles.py
-  serve_local.py  →  http://localhost:8080/  (Python SimpleHTTPRequestHandler + CORS)
-  poc_map --offline  →  MapLibre обращается к localhost:8080
+scripts/serve_local.py        (legacy — no longer needed at runtime)
+scripts/download_tiles.py     (tile download, still needed)
 ```
 
----
+**QMapLibre resolution (CMakeLists.txt):**
+1. External install via `-DQMapLibre_DIR=...` (preferred for CI/Yocto)
+2. Git submodule at `maplibre-native-qt/` via `add_subdirectory`
+3. Auto-download via `FetchContent` (simplest for developers)
 
-## Известные ограничения
+On Windows, post-build copies `QMapLibre*.dll`, `geoservices` plugin, `MapLibre`+`MapLibre.Location` QML modules (with `qmldir`), and runs `windeployqt`.
 
-1. **Pitch/Tilt**: `map.tilt` в Qt Location API работает, если плагин Qt Location объявляет поддержку `TiltFeature`. MapLibre Native поддерживает pitch, но конкретная реализация Qt Location plugin может не экспортировать эту возможность в свойство `map.tilt`. Если кнопка «Tilt» не меняет отображение — это ограничение Qt Location wrapper'а, а не самой MapLibre.
-   **Workaround**: использовать `MapLibre` (standalone QML component из `QMapLibre::Quick` модуля) вместо `MapView`, там pitch доступен напрямую через C++ callback.
+## Dark mode
 
-2. **Offline: только растровые тайлы**: PoC использует PNG тайлы с OSM, а не векторные. Для векторных тайлов (полноценный MapLibre стиль с кастомными слоями) нужен MBTiles + совместимый сервер + полный `style.json` с OpenMapTiles слоями и глифами.
+Implemented via `MapLibre.Location 4.0` QML API — `LayerParameter.paint` is a reactive `QJsonObject`. When `darkMode` property flips, the binding re-evaluates, triggering:
 
-3. **Сборка maplibre-native-qt**: первая сборка занимает 10-40 минут и требует ~3-5 GB свободного места (исходники + сборочные артефакты).
+```
+paint binding -> setPaint() -> paintUpdated -> updateNotify() -> updated()
+  -> onStyleParameterUpdated -> map->setPaintProperty() -> repaint
+```
 
-4. **Переключение Online/Offline в рантайме**: не реализовано — `Plugin.name` нельзя менять после инициализации. Нужен перезапуск или `Loader { active: false }` + `active: true`.
+No Loader/Timer/plugin recreation. Colors defined inline in `qml/main.qml`.
 
-5. **Глифы и метки в offline**: текстовые метки требуют PBF шрифтов. В растровом PoC они не нужны. Для vector tiles нужно либо бандлить шрифты, либо держать их на локальном сервере.
+## Key limitations and notes for Yocto
 
----
-
-## Место на диске
-
-| Артефакт | Размер |
-|----------|--------|
-| maplibre-native-qt исходники + вендор | ~500 MB |
-| maplibre-build/ (build tree) | ~1-3 GB |
-| maplibre-install/ (установленные библиотеки) | ~50-150 MB |
-| tiles/ (Варшава, r=4km, zoom 5-13) | ~35 MB |
-
----
-
-## Ссылки
-
-- [maplibre-native-qt на GitHub](https://github.com/maplibre/maplibre-native-qt)
-- [Документация maplibre-native-qt](https://maplibre.org/maplibre-native-qt/docs/)
-- [MapLibre Style Spec](https://maplibre.org/maplibre-style-spec/)
-- [Qt Location — Map QML type](https://doc.qt.io/qt-6/qml-qtlocation-map.html)
-- [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/)
+- **OpenGL required**: MapLibre Native renders via OpenGL. The Yocto image needs working OpenGL ES 2.0+ (Mesa, proprietary GPU driver, or software renderer like `llvmpipe`).
+- **Qt modules needed**: `qtbase`, `qtdeclarative` (Quick/QML), `qtlocation`, `qtpositioning`. For dark mode: the `MapLibre.Location` QML module must be deployed alongside the app.
+- **Font glyphs**: Labels currently fetch glyphs from `demotiles.maplibre.org` (online). For true offline, download glyph PBFs and serve locally or bundle them. See: https://github.com/openmaptiles/fonts
+- **Tile server is embedded**: The C++ PMTiles reader + QTcpServer are built into the app. No Python or external server needed at runtime. Only `zlib` is required as an additional build dependency (bundled with MinGW and most Linux distros).
+- **Max zoom**: Tiles go up to the `--max-zoom` used during download. Map zoom is capped at 16.9 in QML. No overzoom/upscale beyond tile data (MapLibre Native Qt limitation).
+- **`pmtiles://` protocol**: MapLibre Native Qt does NOT support `pmtiles://` for local file access. Tiles are served over localhost HTTP by the embedded server.
+- **Style URL**: Dynamically constructed at startup with the actual server port. No hardcoded port.

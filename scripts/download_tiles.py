@@ -1,212 +1,555 @@
 #!/usr/bin/env python3
 """
-Download OSM raster tiles for offline use and generate a local style.json.
+Download vector tiles (MBTiles) for offline MapLibre use.
 
 Usage:
-    python3 download_tiles.py [lat] [lon] [radius_km] [max_zoom]
+    python3 download_tiles.py                                  # Poland, zoom 0-14
+    python3 download_tiles.py --country germany                # Germany, zoom 0-14
+    python3 download_tiles.py --country poland --max-zoom 16   # Poland, zoom 0-16 (~8-15 GB!)
+    python3 download_tiles.py --bbox "14.07,49.00,24.15,54.84" --max-zoom 14
+    python3 download_tiles.py --list-countries
 
-Defaults: Warsaw center (52.2297, 21.0122), 4 km radius, zoom 5-13.
+Requires:
+    pmtiles CLI (Go binary, ~10 MB).
+    Download from: https://github.com/protomaps/go-pmtiles/releases
+    Place pmtiles.exe (Windows) or pmtiles (Linux/macOS) in:
+      - next to this script (scripts/pmtiles.exe), OR
+      - anywhere in your PATH
 
 Output:
-    tiles/{z}/{x}/{y}.png    — tile images
-    tiles/offline-style.json — MapLibre style pointing to localhost:8080
+    tiles/<country>.mbtiles    — vector tiles (OpenMapTiles schema, ~1-2 GB for Poland z14)
+    tiles/vector-style.json    — MapLibre style using mbtiles:// (no tile server needed!)
 
-NOTE: Tile downloads are rate-limited to 1 req/s to respect
-      tile.openstreetmap.org usage policy. The OSM tile policy
-      allows low-volume downloads for development/testing.
-      See: https://operations.osmfoundation.org/policies/tiles/
-
-After downloading, start the server:
-    cd tiles
-    python3 ../scripts/serve_local.py
-
-Then run the PoC:
-    ./build/poc_map --offline
+Next steps after downloading:
+    python3 scripts/serve_local.py   # serves style.json on port 8080
+    .\\build\\...\\poc_map.exe
 """
 
+import argparse
 import json
-import math
 import os
+import platform
+import shutil
+import subprocess
 import sys
-import time
+import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
-
-# ── Defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_LAT       = 52.2297   # Warsaw, Poland
-DEFAULT_LON       = 21.0122
-DEFAULT_RADIUS_KM = 4.0
-DEFAULT_MAX_ZOOM  = 13
-MIN_ZOOM          = 5
-
-SERVER_PORT  = 8080
-USER_AGENT   = "MapLibre-PoC/0.1 (+https://github.com/maplibre/maplibre-native-qt; educational)"
-DELAY_SECS   = 1.1            # stay under 1 req/s average
+from typing import Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TILES_DIR  = SCRIPT_DIR.parent / "tiles"
 
+# Protomaps weekly planet build — update date if you get 404
+# Check latest at: https://maps.protomaps.com/builds/
+PLANET_URL = "https://build.protomaps.com/20260331.pmtiles"
 
-# ── Coordinate helpers ────────────────────────────────────────────────────────
-def tile_xy(lat_deg: float, lon_deg: float, zoom: int) -> tuple[int, int]:
-    """OSM/XYZ tile coordinates for a lat/lon."""
-    lat_r = math.radians(lat_deg)
-    n = 1 << zoom
-    x = int((lon_deg + 180.0) / 360.0 * n)
-    y = int((1.0 - math.asinh(math.tan(lat_r)) / math.pi) / 2.0 * n)
-    return x, y
+# bbox format: "min_lon,min_lat,max_lon,max_lat" (EPSG:4326)
+COUNTRIES: dict[str, dict] = {
+    "poland":      {"bbox": "14.07,49.00,24.15,54.84", "center": [52.23, 21.01], "name": "Poland"},
+    "germany":     {"bbox": "5.87,47.27,15.04,55.06",  "center": [51.16, 10.45], "name": "Germany"},
+    "france":      {"bbox": "-5.14,41.33,9.56,51.09",  "center": [46.23,  2.21], "name": "France"},
+    "czechia":     {"bbox": "12.09,48.55,18.86,51.06", "center": [49.82, 15.47], "name": "Czechia"},
+    "ukraine":     {"bbox": "22.14,44.39,40.23,52.38", "center": [48.38, 31.17], "name": "Ukraine"},
+    "netherlands": {"bbox": "3.31,50.80,7.09,53.51",   "center": [52.13,  5.29], "name": "Netherlands"},
+    "austria":     {"bbox": "9.53,46.37,17.16,49.02",  "center": [47.52, 14.55], "name": "Austria"},
+    "sweden":      {"bbox": "10.96,55.34,24.17,69.07", "center": [59.33, 18.07], "name": "Sweden"},
+    "norway":      {"bbox": "4.09,57.81,31.29,71.20",  "center": [60.47,  8.47], "name": "Norway"},
+    "spain":       {"bbox": "-9.39,35.95,3.34,43.97",  "center": [40.42, -3.70], "name": "Spain"},
+    "italy":       {"bbox": "6.63,35.49,18.52,47.09",  "center": [41.90, 12.49], "name": "Italy"},
+}
 
-
-def tiles_in_bbox(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
-    zoom: int,
-) -> list[tuple[int, int, int]]:
-    x0, y1 = tile_xy(lat_min, lon_min, zoom)   # y1 = bigger y (south)
-    x1, y0 = tile_xy(lat_max, lon_max, zoom)   # y0 = smaller y (north)
-    return [
-        (zoom, x, y)
-        for x in range(x0, x1 + 1)
-        for y in range(y0, y1 + 1)
-    ]
-
-
-def km_to_deg(km: float, lat: float) -> tuple[float, float]:
-    lat_d = km / 111.0
-    lon_d = km / (111.0 * math.cos(math.radians(lat)))
-    return lat_d, lon_d
-
-
-# ── Download ──────────────────────────────────────────────────────────────────
-def download_tile(z: int, x: int, y: int) -> bool:
-    """Download tile; return True if newly fetched, False if already cached."""
-    out = TILES_DIR / str(z) / str(x) / f"{y}.png"
-    if out.exists():
-        return False
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            out.write_bytes(resp.read())
-        return True
-    except Exception as exc:
-        print(f"    ⚠ {z}/{x}/{y}: {exc}")
-        return False
+# Size estimates in GB (approximate — actual depends on data density and Protomaps compression).
+# Measured: Poland zoom 16 ≈ 4 GB actual vs 9 GB estimated previously.
+SIZE_ESTIMATES: dict[str, dict[int, float]] = {
+    "poland":      {14: 0.7, 16: 4,   18: 20},
+    "germany":     {14: 1.5, 16: 8,   18: 40},
+    "france":      {14: 1.2, 16: 7,   18: 35},
+    "czechia":     {14: 0.3, 16: 1.5, 18: 8},
+    "ukraine":     {14: 1.0, 16: 5,   18: 25},
+    "netherlands": {14: 0.2, 16: 1.2, 18: 6},
+    "austria":     {14: 0.2, 16: 1.2, 18: 6},
+    "sweden":      {14: 0.7, 16: 4,   18: 20},
+    "norway":      {14: 0.6, 16: 3.5, 18: 18},
+    "spain":       {14: 1.0, 16: 5,   18: 25},
+    "italy":       {14: 1.0, 16: 5,   18: 25},
+}
 
 
-# ── Style generation ──────────────────────────────────────────────────────────
-def write_offline_style(min_zoom: int, max_zoom: int, port: int = SERVER_PORT) -> Path:
-    style = {
+PMTILES_VERSION = "1.30.1"
+PMTILES_RELEASES = {
+    ("Windows", "AMD64"):  f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Windows_x86_64.zip",
+    ("Windows", "ARM64"):  f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Windows_arm64.zip",
+    ("Linux",   "x86_64"): f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Linux_x86_64.zip",
+    ("Linux",   "aarch64"):f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Linux_arm64.zip",
+    ("Darwin",  "x86_64"): f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Darwin_x86_64.zip",
+    ("Darwin",  "arm64"):  f"https://github.com/protomaps/go-pmtiles/releases/download/v{PMTILES_VERSION}/go-pmtiles_{PMTILES_VERSION}_Darwin_arm64.zip",
+}
+
+
+def find_pmtiles_cli() -> Optional[str]:
+    """Find pmtiles binary next to this script or in PATH."""
+    for candidate in [SCRIPT_DIR / "pmtiles.exe", SCRIPT_DIR / "pmtiles"]:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("pmtiles")
+
+
+def download_pmtiles_cli() -> str:
+    """Auto-download pmtiles binary for the current platform into scripts/."""
+    system   = platform.system()                  # Windows / Linux / Darwin
+    machine  = platform.machine()                 # AMD64 / x86_64 / aarch64 / arm64
+
+    # Normalise machine name
+    machine_norm = {"AMD64": "AMD64", "x86_64": "x86_64", "aarch64": "aarch64", "ARM64": "ARM64", "arm64": "arm64"}.get(machine, machine)
+
+    url = PMTILES_RELEASES.get((system, machine_norm))
+    if not url:
+        print(f"ERROR: No prebuilt pmtiles binary for {system}/{machine}.")
+        print(f"  Download manually: https://github.com/protomaps/go-pmtiles/releases")
+        sys.exit(1)
+
+    exe_name = "pmtiles.exe" if system == "Windows" else "pmtiles"
+    dest = SCRIPT_DIR / exe_name
+
+    print(f"  Downloading pmtiles v{PMTILES_VERSION} for {system}/{machine_norm}...")
+    print(f"  From: {url}")
+
+    def _progress(count: int, block: int, total: int) -> None:
+        pct = min(100, count * block * 100 // total) if total > 0 else 0
+        print(f"\r  Progress: {pct}%", end="", flush=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = Path(tmp) / "pmtiles.zip"
+        urllib.request.urlretrieve(url, zip_path, reporthook=_progress)
+        print()  # newline after progress
+
+        with zipfile.ZipFile(zip_path) as zf:
+            # Find the pmtiles binary inside the zip
+            names = zf.namelist()
+            binary = next((n for n in names if n.endswith(exe_name) or n == "pmtiles"), None)
+            if not binary:
+                print(f"ERROR: Could not find '{exe_name}' inside the zip. Contents: {names}")
+                sys.exit(1)
+            zf.extract(binary, tmp)
+            extracted = Path(tmp) / binary
+            shutil.copy2(extracted, dest)
+
+    if system != "Windows":
+        dest.chmod(0o755)
+
+    print(f"  Saved to: {dest}")
+    return str(dest)
+
+
+def run_cmd(cmd: list[str]) -> None:
+    """Run a subprocess, stream output live, raise on non-zero exit."""
+    print(f"  $ {' '.join(str(c) for c in cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def bbox_center(bbox: str) -> list[float]:
+    min_lon, min_lat, max_lon, max_lat = (float(x) for x in bbox.split(","))
+    return [(min_lat + max_lat) / 2, (min_lon + max_lon) / 2]
+
+
+def write_vector_style(pmtiles_path: Path, center: list[float], max_zoom: int,
+                       port: int = 8080) -> Path:
+    """
+    Generate tiles/vector-style.json.
+    Uses standard {z}/{x}/{y} tile URL — same pattern as raster tiles that worked.
+    serve_local.py reads each tile from the PMTiles archive on demand.
+    """
+    archive_name = pmtiles_path.stem          # e.g. "poland"
+    mbtiles_uri  = f"http://localhost:{port}/{archive_name}/{{z}}/{{x}}/{{y}}"
+
+    style: dict = {
         "version": 8,
-        "name": "OSM Offline Raster",
+        "name": "Offline Vector (OpenMapTiles schema)",
+        "center": [center[1], center[0], 10],        # [lon, lat, zoom]
+        # NOTE: glyphs are fetched from the internet for PoC.
+        # Replace with local path once download_fonts.py is implemented.
+        "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
         "sources": {
-            "osm-raster": {
-                "type": "raster",
-                "tiles": [f"http://localhost:{port}/{{z}}/{{x}}/{{y}}.png"],
-                "tileSize": 256,
-                "minzoom": min_zoom,
+            "openmaptiles": {
+                "type": "vector",
+                "tiles": [mbtiles_uri],
                 "maxzoom": max_zoom,
-                "attribution": (
-                    "© <a href='https://www.openstreetmap.org/copyright'>"
-                    "OpenStreetMap contributors</a>"
-                ),
+                "attribution": "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap contributors</a>",
             }
         },
-        "layers": [
-            {
-                "id": "background",
-                "type": "background",
-                "paint": {"background-color": "#f0ebe3"},
-            },
-            {
-                "id": "osm-raster",
-                "type": "raster",
-                "source": "osm-raster",
-                "paint": {"raster-opacity": 1.0},
-            },
-        ],
+        "layers": _build_layers(),
     }
-    out = TILES_DIR / "offline-style.json"
+
+    out = TILES_DIR / "vector-style.json"
     out.write_text(json.dumps(style, indent=2, ensure_ascii=False))
     return out
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+def _build_layers() -> list[dict]:
+    """
+    Layer set for Protomaps v4 basemap schema.
+    Source layers: earth, water, landuse, roads, boundaries, places, pois
+    Road kind values: highway, major_road, medium_road, minor_road, path
+    """
+    return [
+        # ── Background ────────────────────────────────────────────────────────
+        {
+            "id": "background",
+            "type": "background",
+            "paint": {"background-color": "#f0ebe3"},
+        },
+
+        # ── Land (earth layer = landmass polygon) ─────────────────────────────
+        {
+            "id": "earth",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "earth",
+            "paint": {"fill-color": "#f0ebe3"},
+        },
+
+        # ── Water ─────────────────────────────────────────────────────────────
+        {
+            "id": "water",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "water",
+            "paint": {"fill-color": "#a8c8f0"},
+        },
+
+        # ── Landuse ───────────────────────────────────────────────────────────
+        {
+            "id": "landuse-green",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "landuse",
+            "filter": ["in", ["get", "kind"], ["literal", ["park", "grass", "garden", "playground", "national_park", "nature_reserve"]]],
+            "paint": {"fill-color": "#d8f0c8"},
+        },
+        {
+            "id": "landuse-forest",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "landuse",
+            "filter": ["in", ["get", "kind"], ["literal", ["forest", "wood"]]],
+            "paint": {"fill-color": "#c0dca8"},
+        },
+        {
+            "id": "landuse-industrial",
+            "type": "fill",
+            "source": "openmaptiles",
+            "source-layer": "landuse",
+            "filter": ["==", ["get", "kind"], "industrial"],
+            "paint": {"fill-color": "#e8ddd0"},
+        },
+
+        # ── Roads — casing (outline) ──────────────────────────────────────────
+        {
+            "id": "road-highway-casing",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["==", ["get", "kind"], "highway"],
+            "paint": {
+                "line-color": "#c87030",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 6, 3, 14, 10],
+                "line-cap": "round",
+                "line-join": "round",
+            },
+        },
+        {
+            "id": "road-major-casing",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["==", ["get", "kind"], "major_road"],
+            "minzoom": 8,
+            "paint": {
+                "line-color": "#d0a060",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2, 14, 7],
+                "line-cap": "round",
+            },
+        },
+
+        # ── Roads — fill ──────────────────────────────────────────────────────
+        {
+            "id": "road-highway",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["==", ["get", "kind"], "highway"],
+            "paint": {
+                "line-color": "#f09050",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.5, 14, 7],
+                "line-cap": "round",
+                "line-join": "round",
+            },
+        },
+        {
+            "id": "road-major",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["==", ["get", "kind"], "major_road"],
+            "minzoom": 8,
+            "paint": {
+                "line-color": "#ffd080",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1, 14, 5],
+                "line-cap": "round",
+            },
+        },
+        {
+            "id": "road-medium",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["==", ["get", "kind"], "medium_road"],
+            "minzoom": 10,
+            "paint": {
+                "line-color": "#ffffff",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 3.5],
+                "line-cap": "round",
+            },
+        },
+        {
+            "id": "road-minor",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["in", ["get", "kind"], ["literal", ["minor_road", "path"]]],
+            "minzoom": 13,
+            "paint": {
+                "line-color": "#ffffff",
+                "line-width": 1,
+            },
+        },
+
+        # ── Boundaries ────────────────────────────────────────────────────────
+        {
+            "id": "boundary-country",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "boundaries",
+            "filter": ["==", ["get", "kind"], "country"],
+            "paint": {
+                "line-color": "#8080c0",
+                "line-width": 1.5,
+                "line-dasharray": [4, 2],
+            },
+        },
+        {
+            "id": "boundary-region",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "boundaries",
+            "filter": ["==", ["get", "kind"], "region"],
+            "minzoom": 6,
+            "paint": {
+                "line-color": "#b0b0d0",
+                "line-width": 0.8,
+                "line-dasharray": [3, 2],
+            },
+        },
+
+        # ── Labels ────────────────────────────────────────────────────────────
+        {
+            "id": "label-city",
+            "type": "symbol",
+            "source": "openmaptiles",
+            "source-layer": "places",
+            "filter": ["in", ["get", "kind"], ["literal", ["city", "town"]]],
+            "layout": {
+                "text-field": ["get", "name"],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 6, 10, 14, 14],
+                "text-max-width": 8,
+                "text-anchor": "center",
+            },
+            "paint": {
+                "text-color": "#333333",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5,
+            },
+        },
+        {
+            "id": "label-village",
+            "type": "symbol",
+            "source": "openmaptiles",
+            "source-layer": "places",
+            "filter": ["in", ["get", "kind"], ["literal", ["village", "suburb", "hamlet"]]],
+            "minzoom": 11,
+            "layout": {
+                "text-field": ["get", "name"],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": 11,
+                "text-max-width": 8,
+            },
+            "paint": {
+                "text-color": "#555555",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5,
+            },
+        },
+        {
+            "id": "label-road",
+            "type": "symbol",
+            "source": "openmaptiles",
+            "source-layer": "roads",
+            "filter": ["has", "name"],
+            "minzoom": 14,
+            "layout": {
+                "text-field": ["get", "name"],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": 11,
+                "symbol-placement": "line",
+                "text-max-angle": 30,
+            },
+            "paint": {
+                "text-color": "#555555",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1,
+            },
+        },
+    ]
+
+
 def main() -> None:
-    args = sys.argv[1:]
-    lat       = float(args[0]) if len(args) > 0 else DEFAULT_LAT
-    lon       = float(args[1]) if len(args) > 1 else DEFAULT_LON
-    radius_km = float(args[2]) if len(args) > 2 else DEFAULT_RADIUS_KM
-    max_zoom  = int(args[3])   if len(args) > 3 else DEFAULT_MAX_ZOOM
+    parser = argparse.ArgumentParser(
+        description="Download vector tiles (MBTiles) for offline MapLibre use.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--country", default="poland", metavar="NAME",
+        help="Country to download (default: poland). Use --list-countries to see all options.",
+    )
+    group.add_argument(
+        "--bbox", metavar="'MIN_LON,MIN_LAT,MAX_LON,MAX_LAT'",
+        help="Custom bounding box, e.g. '14.07,49.00,24.15,54.84'",
+    )
+    parser.add_argument(
+        "--max-zoom", type=int, default=14,
+        help="Maximum zoom level (default: 14). WARNING: 16 = ~8-15 GB for Poland; 18 = ~40-60 GB",
+    )
+    parser.add_argument(
+        "--list-countries", action="store_true",
+        help="Print available country names with bbox and size estimates, then exit.",
+    )
+    parser.add_argument(
+        "--source", default=PLANET_URL, metavar="URL",
+        help=f"Protomaps planet PMTiles URL (default: {PLANET_URL})",
+    )
+    args = parser.parse_args()
 
-    lat_d, lon_d = km_to_deg(radius_km, lat)
-    bbox = (lat - lat_d, lat + lat_d, lon - lon_d, lon + lon_d)
+    if args.list_countries:
+        print()
+        print("Available countries (--country NAME):")
+        print()
+        col = max(len(k) for k in COUNTRIES) + 2
+        for key, info in COUNTRIES.items():
+            est = SIZE_ESTIMATES.get(key, {})
+            sizes = "  ".join(f"z{z}≈{est[z]}GB" for z in sorted(est)) if est else "unknown"
+            print(f"  {key:<{col}} bbox: {info['bbox']}")
+            print(f"  {'':>{col}} size: {sizes}")
+            print()
+        return
 
-    print("═" * 52)
-    print("  OSM Raster Tile Downloader for MapLibre PoC")
-    print("═" * 52)
-    print(f"  Center : {lat}, {lon}")
-    print(f"  Radius : {radius_km} km")
-    print(f"  Zoom   : {MIN_ZOOM} – {max_zoom}")
-    print(f"  Output : {TILES_DIR}")
-    print()
+    # ── Resolve country / custom bbox ─────────────────────────────────────────
+    if args.bbox:
+        bbox         = args.bbox.strip()
+        country_key  = "custom"
+        center       = bbox_center(bbox)
+        country_name = f"custom region ({bbox})"
+        size_hint    = None
+    else:
+        country_key = args.country.lower()
+        if country_key not in COUNTRIES:
+            print(f"Unknown country '{args.country}'. Use --list-countries to see options.")
+            sys.exit(1)
+        info         = COUNTRIES[country_key]
+        bbox         = info["bbox"]
+        center       = info["center"]
+        country_name = info["name"]
+        size_hint    = SIZE_ESTIMATES.get(country_key, {}).get(args.max_zoom)
 
     TILES_DIR.mkdir(exist_ok=True)
 
-    # Collect all tiles across zoom levels
-    all_tiles: list[tuple[int, int, int]] = []
-    for z in range(MIN_ZOOM, max_zoom + 1):
-        zl = tiles_in_bbox(*bbox, z)
-        all_tiles.extend(zl)
-        print(f"  zoom {z:2d}: {len(zl):5d} tiles")
+    pmtiles_out = TILES_DIR / f"{country_key}.pmtiles"
 
-    total = len(all_tiles)
-    estimated_mb = total * 0.025   # ~25 KB average per PNG
+    # ── Check pmtiles CLI (auto-download if missing) ──────────────────────────
+    pmtiles_bin = find_pmtiles_cli()
+    if not pmtiles_bin:
+        print()
+        print("  'pmtiles' CLI not found — downloading automatically...")
+        pmtiles_bin = download_pmtiles_cli()
+        print()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
     print()
-    print(f"  Total tiles : {total}")
-    print(f"  Estimated   : ~{estimated_mb:.0f} MB")
+    print("=" * 62)
+    print("  Vector Tile Downloader  (Protomaps -> MBTiles)")
+    print("=" * 62)
+    print(f"  Country  : {country_name}")
+    print(f"  BBox     : {bbox}")
+    print(f"  Max zoom : {args.max_zoom}")
+    print(f"  Output   : {pmtiles_out}")
+    print(f"  Source   : {args.source}")
     print()
-    print("  Rate-limited to 1 req/s (OSM tile policy).")
-    answer = input("  Continue? [y/N] ").strip().lower()
-    if answer not in ("y", "yes"):
-        print("Aborted.")
-        return
-
+    if size_hint:
+        print(f"  WARNING: estimated size ~{size_hint} GB")
+    if args.max_zoom >= 16:
+        print(f"  WARNING: zoom {args.max_zoom} produces large files and takes a long time.")
+        print(f"           Consider --max-zoom 14 for an initial test.")
     print()
-    downloaded = skipped = errors = 0
-    for i, (z, x, y) in enumerate(all_tiles, 1):
-        ok = download_tile(z, x, y)
-        if ok:
-            downloaded += 1
-            print(f"  [{i:5d}/{total}] ✓  {z}/{x}/{y}.png")
-            time.sleep(DELAY_SECS)
-        else:
-            skipped += 1
 
+    if pmtiles_out.exists():
+        size_mb = pmtiles_out.stat().st_size / 1024 / 1024
+        print(f"  PMTiles already exists ({size_mb:.0f} MB). Skipping download.")
+        print(f"  Delete '{pmtiles_out.name}' to re-download.")
+        print()
+    else:
+        answer = input("  Continue? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+        print()
+
+        print("  Extracting region from Protomaps planet...")
+        print("  (streams over HTTP range requests — fast, no full planet download)")
+        print()
+        run_cmd([
+            pmtiles_bin, "extract",
+            args.source,
+            str(pmtiles_out),
+            f"--bbox={bbox}",
+            f"--maxzoom={args.max_zoom}",
+        ])
+        print()
+
+    # ── Show file size ────────────────────────────────────────────────────────
+    if pmtiles_out.exists():
+        size_mb = pmtiles_out.stat().st_size / 1024 / 1024
+        print(f"  PMTiles size : {size_mb:.0f} MB  ({size_mb / 1024:.2f} GB)")
+
+    # ── Generate style.json ───────────────────────────────────────────────────
+    style_path = write_vector_style(pmtiles_out, center, args.max_zoom)
+    print(f"  Style        : {style_path}")
     print()
-    print(f"  Downloaded : {downloaded}  |  Cached : {skipped}  |  Errors : {errors}")
-
-    style_path = write_offline_style(MIN_ZOOM, max_zoom)
-    print(f"  Style      : {style_path}")
-
-    # Disk usage
-    png_files = list(TILES_DIR.rglob("*.png"))
-    total_bytes = sum(f.stat().st_size for f in png_files)
-    print(f"  Disk usage : {total_bytes / 1024 / 1024:.1f} MB ({len(png_files)} files)")
-
-    print()
-    print("═" * 52)
+    print("=" * 62)
     print("  Done! Next steps:")
     print()
-    print("  1. Start tile server:")
-    print(f"       cd {TILES_DIR}")
-    print(f"       python3 {SCRIPT_DIR}/serve_local.py")
+    print("  1. Start style server (for style.json):")
+    print(f"       python {SCRIPT_DIR}\\serve_local.py")
     print()
-    print("  2. Run the PoC in offline mode:")
-    print("       ./build/poc_map --offline")
-    print("═" * 52)
+    print("  2. Run the PoC:")
+    print(f"       .\\build\\Desktop_Qt_6_9_2_MinGW_64_bit-Debug\\poc_map.exe")
+    print()
+    print("  NOTE: City/road labels require internet (CDN glyphs).")
+    print("  The map tiles themselves are fully offline via mbtiles://")
+    print("=" * 62)
+    print()
 
 
 if __name__ == "__main__":

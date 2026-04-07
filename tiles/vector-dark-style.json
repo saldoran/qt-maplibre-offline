@@ -1,0 +1,219 @@
+{
+  "version": 8,
+  "name": "Offline Vector Dark (Protomaps v4 schema)",
+  "center": [21.01, 52.23, 10],
+  "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+  "sources": {
+    "openmaptiles": {
+      "type": "vector",
+      "tiles": ["http://localhost:8080/poland/{z}/{x}/{y}"],
+      "maxzoom": 16,
+      "attribution": "\u00a9 <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap contributors</a>"
+    }
+  },
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": { "background-color": "#1a1a2e" }
+    },
+    {
+      "id": "earth",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "earth",
+      "paint": { "fill-color": "#16213e" }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": { "fill-color": "#0a2a4a" }
+    },
+    {
+      "id": "landuse-green",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landuse",
+      "filter": ["in", ["get", "kind"], ["literal", ["park", "grass", "garden", "playground", "national_park", "nature_reserve"]]],
+      "paint": { "fill-color": "#1a2e1a" }
+    },
+    {
+      "id": "landuse-forest",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landuse",
+      "filter": ["in", ["get", "kind"], ["literal", ["forest", "wood"]]],
+      "paint": { "fill-color": "#142214" }
+    },
+    {
+      "id": "landuse-industrial",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landuse",
+      "filter": ["==", ["get", "kind"], "industrial"],
+      "paint": { "fill-color": "#252535" }
+    },
+    {
+      "id": "road-highway-casing",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["==", ["get", "kind"], "highway"],
+      "paint": {
+        "line-color": "#604020",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 6, 3, 14, 10],
+        "line-cap": "round",
+        "line-join": "round"
+      }
+    },
+    {
+      "id": "road-major-casing",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["==", ["get", "kind"], "major_road"],
+      "minzoom": 8,
+      "paint": {
+        "line-color": "#504020",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2, 14, 7],
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "road-highway",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["==", ["get", "kind"], "highway"],
+      "paint": {
+        "line-color": "#c08040",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.5, 14, 7],
+        "line-cap": "round",
+        "line-join": "round"
+      }
+    },
+    {
+      "id": "road-major",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["==", ["get", "kind"], "major_road"],
+      "minzoom": 8,
+      "paint": {
+        "line-color": "#907030",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1, 14, 5],
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "road-medium",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["==", ["get", "kind"], "medium_road"],
+      "minzoom": 10,
+      "paint": {
+        "line-color": "#3a3a4a",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 3.5],
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "road-minor",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["in", ["get", "kind"], ["literal", ["minor_road", "path"]]],
+      "minzoom": 13,
+      "paint": {
+        "line-color": "#2a2a3a",
+        "line-width": 1
+      }
+    },
+    {
+      "id": "boundary-country",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "boundaries",
+      "filter": ["==", ["get", "kind"], "country"],
+      "paint": {
+        "line-color": "#7070c0",
+        "line-width": 1.5,
+        "line-dasharray": [4, 2]
+      }
+    },
+    {
+      "id": "boundary-region",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "boundaries",
+      "filter": ["==", ["get", "kind"], "region"],
+      "minzoom": 6,
+      "paint": {
+        "line-color": "#404070",
+        "line-width": 0.8,
+        "line-dasharray": [3, 2]
+      }
+    },
+    {
+      "id": "label-city",
+      "type": "symbol",
+      "source": "openmaptiles",
+      "source-layer": "places",
+      "filter": ["in", ["get", "kind"], ["literal", ["city", "town"]]],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 6, 10, 14, 14],
+        "text-max-width": 8,
+        "text-anchor": "center"
+      },
+      "paint": {
+        "text-color": "#e8e8e8",
+        "text-halo-color": "#1a1a2e",
+        "text-halo-width": 1.5
+      }
+    },
+    {
+      "id": "label-village",
+      "type": "symbol",
+      "source": "openmaptiles",
+      "source-layer": "places",
+      "filter": ["in", ["get", "kind"], ["literal", ["village", "suburb", "hamlet"]]],
+      "minzoom": 11,
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": 11,
+        "text-max-width": 8
+      },
+      "paint": {
+        "text-color": "#b8b8c8",
+        "text-halo-color": "#1a1a2e",
+        "text-halo-width": 1.5
+      }
+    },
+    {
+      "id": "label-road",
+      "type": "symbol",
+      "source": "openmaptiles",
+      "source-layer": "roads",
+      "filter": ["has", "name"],
+      "minzoom": 14,
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": 11,
+        "symbol-placement": "line",
+        "text-max-angle": 30
+      },
+      "paint": {
+        "text-color": "#909090",
+        "text-halo-color": "#1a1a2e",
+        "text-halo-width": 1
+      }
+    }
+  ]
+}

@@ -11,12 +11,14 @@ compile_commands.json
 .ninja_*
 *.ninja
 
-# ── maplibre-native-qt (clone or build output — not committed) ───────────────
+# ── maplibre-native-qt (clone / build / install — not committed) ────────────
 maplibre-native-qt/
 maplibre-build/
 maplibre-install/
 
-# ── Offline tiles (can be 10-100 MB — not committed) ────────────────────────
+# ── Offline tiles (hundreds of MB to GB — not committed) ────────────────────
+tiles/*.pmtiles
+tiles/[0-9]*/
 tiles/*.png
 tiles/**/*.png
 tiles/offline-style.json
@@ -24,23 +26,31 @@ tiles/offline-style.json
 # Keep the placeholder
 !tiles/.gitkeep
 
-# ── Qt Creator ───────────────────────────────────────────────────────────────
+# ── Downloaded binaries ─────────────────────────────────────────────────────
+scripts/pmtiles.exe
+scripts/pmtiles
+
+# ── Claude Code ─────────────────────────────────────────────────────────────
+.claude/
+
+# ── Qt Creator ──────────────────────────────────────────────────────────────
 *.pro.user
 *.qmlproject.user
 .qtcreator/
+CMakeLists.txt.user
 
-# ── IDE ──────────────────────────────────────────────────────────────────────
+# ── IDE ─────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *~
 
-# ── OS ───────────────────────────────────────────────────────────────────────
+# ── OS ──────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── Python ───────────────────────────────────────────────────────────────────
+# ── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
