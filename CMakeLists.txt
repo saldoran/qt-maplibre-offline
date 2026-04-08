@@ -23,31 +23,18 @@ qt_standard_project_setup(REQUIRES 6.5)
 find_package(QMapLibre QUIET COMPONENTS Core Location)
 
 if(NOT QMapLibre_FOUND)
-    # Options must be set before add_subdirectory / FetchContent_MakeAvailable
-    set(MLN_QT_WITH_WIDGETS        OFF CACHE BOOL "" FORCE)
-    set(MLN_QT_WITH_LOCATION       ON  CACHE BOOL "" FORCE)
-    set(MLN_QT_WITH_QUICK_PLUGIN   ON  CACHE BOOL "" FORCE)
-    set(MLN_WITH_OPENGL            ON  CACHE BOOL "" FORCE)
-
-    set(_mln_submod "${CMAKE_CURRENT_SOURCE_DIR}/maplibre-native-qt")
-    if(EXISTS "${_mln_submod}/CMakeLists.txt")
-        # Priority 2: local submodule
-        message(STATUS "QMapLibre not installed — building from submodule")
-        add_subdirectory("${_mln_submod}" maplibre-native-qt EXCLUDE_FROM_ALL)
-    else()
-        # Priority 3: auto-download via FetchContent
-        message(STATUS "QMapLibre not installed — downloading via FetchContent (this takes a while the first time)")
-        include(FetchContent)
-        set(FETCHCONTENT_QUIET OFF)
-        FetchContent_Declare(maplibre-native-qt
-            GIT_REPOSITORY https://github.com/maplibre/maplibre-native-qt.git
-            GIT_TAG        main
-            GIT_SHALLOW    ON
-            GIT_SUBMODULES_RECURSE ON
-            GIT_PROGRESS   ON
-        )
-        FetchContent_MakeAvailable(maplibre-native-qt)
-    endif()
+    message(FATAL_ERROR
+        "\n"
+        "  QMapLibre not found. Build it first (one-time, ~15-40 min):\n"
+        "\n"
+        "  Windows (PowerShell):\n"
+        "    .\\scripts\\build_maplibre_qt.ps1 -QtDir \"<Qt>/lib/cmake/Qt6\"\n"
+        "\n"
+        "  Linux / macOS:\n"
+        "    bash scripts/build_maplibre_qt.sh\n"
+        "\n"
+        "  Then re-run cmake with:\n"
+        "    -DQMapLibre_DIR=maplibre-install/lib/cmake/QMapLibre\n")
 endif()
 
 # ── Executable ───────────────────────────────────────────────────────────────

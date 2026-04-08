@@ -17,27 +17,7 @@ A minimal Qt Quick + MapLibre Native PoC that renders an interactive 2.5D vector
   git config --global core.longpaths true
   ```
 
-### Build the PoC
-
-The simplest way — CMake auto-downloads `maplibre-native-qt` via FetchContent (first build takes 15-40 min, ~3.5 GB):
-
-```bash
-# Windows MinGW:
-cmake -B build -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH="C:\Qt\6.9.2\mingw_64"
-cmake --build build
-
-# Linux/macOS:
-cmake -B build
-cmake --build build
-```
-
-QMapLibre is resolved in this order:
-1. **External install** — pass `-DQMapLibre_DIR=<path>/lib/cmake/QMapLibre`
-2. **Git submodule** — if `maplibre-native-qt/` directory exists locally
-3. **FetchContent** (automatic) — downloads and builds from GitHub
-
-#### Option: pre-build MapLibre separately (faster re-builds)
+### Build MapLibre (one-time, ~15-40 min)
 
 ```powershell
 # Windows (PowerShell):
@@ -47,8 +27,18 @@ QMapLibre is resolved in this order:
 bash scripts/build_maplibre_qt.sh
 ```
 
-Then pass the install path:
+This clones, builds and installs `maplibre-native-qt` into `maplibre-install/`.
+
+### Build the PoC
+
 ```bash
+# Windows MinGW:
+cmake -B build -G "MinGW Makefiles" \
+  -DCMAKE_PREFIX_PATH="C:\Qt\6.9.2\mingw_64" \
+  -DQMapLibre_DIR="maplibre-install/lib/cmake/QMapLibre"
+cmake --build build
+
+# Linux/macOS:
 cmake -B build -DQMapLibre_DIR="maplibre-install/lib/cmake/QMapLibre"
 cmake --build build
 ```
@@ -149,9 +139,7 @@ scripts/download_tiles.py     (tile download, still needed)
 ```
 
 **QMapLibre resolution (CMakeLists.txt):**
-1. External install via `-DQMapLibre_DIR=...` (preferred for CI/Yocto)
-2. Git submodule at `maplibre-native-qt/` via `add_subdirectory`
-3. Auto-download via `FetchContent` (simplest for developers)
+External install via `-DQMapLibre_DIR=...` (run the build script first).
 
 On Windows, post-build copies `QMapLibre*.dll`, `geoservices` plugin, `MapLibre`+`MapLibre.Location` QML modules (with `qmldir`), and runs `windeployqt`.
 
